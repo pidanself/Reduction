@@ -17,6 +17,50 @@ __global__ void reduceNeighbored(int *g_idata, int *g_odata)
     {
         if (tid % (stride * 2) == 0)
         {
+            s_data[tid] += s_data[tid + stride];
+        }
+        __syncthreads();
+    }
+    if (tid == 0)
+    {
+        g_odata[blockIdx.x] = s_data[0];
+    }
+}
+
+__global__ void reduceDivergence(int *g_idata, int *g_odata)
+{
+    unsigned int tid = threadIdx.x;
+    int *g_cur_idata = g_idata + blockDim.x * blockIdx.x;
+    // create 1024 int shared memory
+    __shared__ int s_data[1024];
+    s_data[tid] = g_cur_idata[tid];
+
+    for (int stride = 1; stride < blockDim.x; stride *= 2)
+    {
+        int index = 2 * tid * stride;
+        if (index < blockDim.x)
+        {
+            s_data[index] += s_data[index + stride];
+        }
+        __syncthreads();
+    }
+    if (tid == 0)
+    {
+        g_odata[blockIdx.x] = s_data[0];
+    }
+}
+
+__global__ void reduceBankConflict(int *g_idata, int *g_odata)
+{
+    unsigned int tid = threadIdx.x;
+    int *g_cur_idata = g_idata + blockDim.x * blockIdx.x;
+    // create 1024 int shared memory
+    __shared__ int s_data[1024];
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if (tid < stride)
+        {
             s_data[tid] = s_data[tid + stride];
         }
         __syncthreads();
@@ -26,6 +70,51 @@ __global__ void reduceNeighbored(int *g_idata, int *g_odata)
         g_odata[blockIdx.x] = s_data[0];
     }
 }
+
+__global__ void reduceAddGlobal(int *g_idata, int *g_odata)
+{
+    unsigned int tid = threadIdx.x;
+    int *g_cur_idata = g_idata + 2 * blockDim.x * blockIdx.x;
+    // create 1024 int shared memory
+    __shared__ int s_data[1024];
+    s_data[tid] = g_cur_idata[tid] + g_cur_idata[tid + blockDim.x];
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if (tid < stride)
+        {
+            s_data[tid] = s_data[tid + stride];
+        }
+        __syncthreads();
+    }
+    if (tid == 0)
+    {
+        g_odata[blockIdx.x] = s_data[0];
+    }
+}
+
+__global__ void reduceUnroll(int *g_idata, int *g_odata)
+{
+    unsigned int tid = threadIdx.x;
+    int *g_cur_idata = g_idata + 2 * blockDim.x * blockIdx.x;
+    // create 1024 int shared memory
+    __shared__ int s_data[1024];
+    s_data[tid] = g_cur_idata[tid] + g_cur_idata[tid + blockDim.x];
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    {
+        if (tid < stride)
+        {
+            s_data[tid] = s_data[tid + stride];
+        }
+        __syncthreads();
+    }
+    if (tid == 0)
+    {
+        g_odata[blockIdx.x] = s_data[0];
+    }
+}
+
 __global__ void warmup(int *g_idata, int *g_odata, unsigned int n)
 {
     // set thread ID
@@ -98,8 +187,7 @@ int main(int argc, char **argv)
     iElaps = cpuSecond() - iStart;
     printf("cpu reduce                 elapsed %lf ms cpu_sum: %d\n", iElaps, cpu_sum);
 
-    // kernel 1:reduceNeighbored
-
+    // warmup
     CHECK(cudaMemcpy(idata_dev, idata_host, bytes, cudaMemcpyHostToDevice));
     CHECK(cudaDeviceSynchronize());
     iStart = cpuSecond();
@@ -114,7 +202,6 @@ int main(int argc, char **argv)
            iElaps, gpu_sum, grid.x, block.x);
 
     // kernel 1:reduceNeighbored
-
     CHECK(cudaMemcpy(idata_dev, idata_host, bytes, cudaMemcpyHostToDevice));
     CHECK(cudaDeviceSynchronize());
     iStart = cpuSecond();
@@ -128,8 +215,52 @@ int main(int argc, char **argv)
     printf("gpu reduceNeighbored       elapsed %lf ms gpu_sum: %d<<<grid %d block %d>>>\n",
            iElaps, gpu_sum, grid.x, block.x);
 
-    // free host memory
 
+    // kernel 2:reduceDivergency
+    CHECK(cudaMemcpy(idata_dev, idata_host, bytes, cudaMemcpyHostToDevice));
+    CHECK(cudaDeviceSynchronize());
+    iStart = cpuSecond();
+    reduceDivergence<<<grid, block>>>(idata_dev, odata_dev);
+    cudaDeviceSynchronize();
+    iElaps = cpuSecond() - iStart;
+    cudaMemcpy(odata_host, odata_dev, grid.x * sizeof(int), cudaMemcpyDeviceToHost);
+    gpu_sum = 0;
+    for (int i = 0; i < grid.x; i++)
+        gpu_sum += odata_host[i];
+    printf("gpu reduceDivergence       elapsed %lf ms gpu_sum: %d<<<grid %d block %d>>>\n",
+            iElaps, gpu_sum, grid.x, block.x);
+    
+
+    // kernel 3:reduceBankConflict
+    CHECK(cudaMemcpy(idata_dev, idata_host, bytes, cudaMemcpyHostToDevice));
+    CHECK(cudaDeviceSynchronize());
+    iStart = cpuSecond();
+    reduceBankConflict<<<grid, block>>>(idata_dev, odata_dev);
+    cudaDeviceSynchronize();
+    iElaps = cpuSecond() - iStart;
+    cudaMemcpy(odata_host, odata_dev, grid.x * sizeof(int), cudaMemcpyDeviceToHost);
+    gpu_sum = 0;
+    for (int i = 0; i < grid.x; i++)
+        gpu_sum += odata_host[i];
+    printf("gpu reduceBankConflict       elapsed %lf ms gpu_sum: %d<<<grid %d block %d>>>\n",
+            iElaps, gpu_sum, grid.x, block.x);
+
+    // kernel 4:reduceAddGlobal
+    CHECK(cudaMemcpy(idata_dev, idata_host, bytes, cudaMemcpyHostToDevice));
+    CHECK(cudaDeviceSynchronize());
+    dim3 gridHalf(((size - 1) / block.x + 1)/2, 1);
+    iStart = cpuSecond();
+    reduceAddGlobal<<<gridHalf, block>>>(idata_dev, odata_dev);
+    cudaDeviceSynchronize();
+    iElaps = cpuSecond() - iStart;
+    cudaMemcpy(odata_host, odata_dev, grid.x * sizeof(int) / 2, cudaMemcpyDeviceToHost);
+    gpu_sum = 0;
+    for (int i = 0; i < grid.x/2; i++)
+        gpu_sum += odata_host[i];
+    printf("gpu reduceAddGlobal       elapsed %lf ms gpu_sum: %d<<<grid %d block %d>>>\n",
+            iElaps, gpu_sum, grid.x, block.x);
+
+    // free host memory
     free(idata_host);
     free(odata_host);
     CHECK(cudaFree(idata_dev));
